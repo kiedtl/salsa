@@ -3,6 +3,7 @@ const mem = std.mem;
 
 const lexerm = @import("lexer.zig");
 const parserm = @import("parser.zig");
+const codegen = @import("codegen.zig");
 
 const Program = @import("common.zig").Program;
 
@@ -37,4 +38,6 @@ pub fn main() anyerror!void {
 
     var parser = parserm.Parser.init(&program, &gpa.allocator);
     try parser.parse(&lexed);
+
+    try codegen.extractLabels(&program);
 }

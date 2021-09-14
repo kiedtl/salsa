@@ -4,7 +4,6 @@ const activeTag = std.meta.activeTag;
 
 const lexer = @import("lexer.zig");
 
-const ROM_Allocator = @import("common.zig").ROM_Allocator;
 const Program = @import("common.zig").Program;
 const Node = @import("common.zig").Node;
 const NodeList = @import("common.zig").NodeList;

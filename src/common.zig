@@ -1,30 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
 
-// Manage the memory layout of the ROM
-pub const ROM_Allocator = struct {
-    labels: std.ArrayList(Block),
-    data: std.ArrayList(Block),
-
-    pub const Block = struct {
-        size: usize,
-        name: []const u8,
-        node: ?*Node,
-    };
-
-    pub fn init(alloc: *mem.Allocator) ROM_Allocator {
-        return .{
-            .labels = std.ArrayList(Block).init(alloc),
-            .data = std.ArrayList(Block).init(alloc),
-        };
-    }
-
-    pub fn addLabel(self: *ROM_Allocator, name: []const u8, node: *Node) !usize {
-        try self.labels.append(.{ .size = undefined, .name = name, .node = node });
-        return self.labels.items.len - 1;
-    }
-};
-
 pub const NodeList = std.ArrayList(Node);
 
 pub const Node = struct {
@@ -54,7 +30,6 @@ pub const Node = struct {
 
     pub const Label = struct {
         name: []const u8,
-        ra_id: ?usize = null,
         body: *Node,
     };
 
@@ -65,13 +40,21 @@ pub const Node = struct {
 };
 
 pub const Program = struct {
-    ra_alloc: ROM_Allocator,
+    // Nodes must *not* be added to this list after parsing is complete, period.
+    // Doing so may cause a reallocation, invalidating all existing pointers.
     body: NodeList,
+
+    labels: std.ArrayList(Label),
+
+    pub const Label = struct {
+        name: []const u8,
+        node: *Node,
+    };
 
     pub fn init(alloc: *mem.Allocator) Program {
         return .{
-            .ra_alloc = ROM_Allocator.init(alloc),
             .body = NodeList.init(alloc),
+            .labels = std.ArrayList(Label).init(alloc),
         };
     }
 };
