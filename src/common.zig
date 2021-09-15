@@ -1,6 +1,10 @@
 const std = @import("std");
 const mem = std.mem;
 
+const StackBuffer = @import("buffer.zig").StackBuffer;
+const StackBufferError = @import("buffer.zig").StackBufferError;
+
+pub const ROMBuf = StackBuffer(u8, 65535);
 pub const NodeList = std.ArrayList(Node);
 
 pub const Node = struct {
@@ -9,11 +13,11 @@ pub const Node = struct {
     is_child: bool,
 
     pub const NodeType = union(enum) {
+        Data: std.ArrayList(Value),
         Assignment: Assignment,
         Label: Label,
         Loop: *Node,
         Proc: NodeList,
-        Data: std.ArrayList(Value),
     };
 
     pub const Register = union(enum) {
@@ -25,7 +29,8 @@ pub const Node = struct {
     pub const Value = union(enum) {
         Identifier: []const u8,
         Register: Register,
-        Literal: usize,
+        Byte: u8,
+        Word: u16,
     };
 
     pub const Label = struct {
@@ -49,6 +54,7 @@ pub const Program = struct {
     pub const Label = struct {
         name: []const u8,
         node: *Node,
+        location: usize = 0,
     };
 
     pub fn init(alloc: *mem.Allocator) Program {
