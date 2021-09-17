@@ -13,6 +13,8 @@ const Value = @import("common.zig").Node.Value;
 const ValueList = @import("common.zig").ValueList;
 const NodeList = @import("common.zig").NodeList;
 
+const ROM_START = 0x200;
+
 const CodegenError = error{
     DuplicateLabel,
     NoMainLabel,
@@ -68,7 +70,7 @@ pub const BUILTINS = [_]Builtin{
 
 // 1NNN: JMP: Jump to NNN
 fn UI_jump(address: u12) u16 {
-    return 0x1000 | @as(u16, address);
+    return 0x1000 | @as(u16, ROM_START + address);
 }
 
 fn emit(buf: *ROMBuf, data: anytype) CodegenError!void {
@@ -104,8 +106,8 @@ fn genNodeBytecode(node: *Node, buf: *ROMBuf, ual: *UAList) CodegenError!void {
         .Label => |l| return error.LabelFoundAsChild,
         .BuiltinCall => |b| try (b.builtin.func)(node, b.node.items, buf, ual),
         .Loop => |l| {
-            const loop_start = buf.len;
-            if (loop_start >= 0xFFF) {
+            const loop_start = buf.len - 2;
+            if ((ROM_START + loop_start) >= 0xFFF) {
                 return error.JumpFoundInDataROM;
             }
 
@@ -134,12 +136,12 @@ pub fn generateBinary(program: *Program, buf: *ROMBuf, alloc: *mem.Allocator) Co
     ual_search: for (ual.items) |ua| {
         for (program.labels.items) |label| if (mem.eql(u8, label.name, ua.identifier)) {
             const val: u16 = switch (ua.type) {
-                .Data => @intCast(u16, label.location),
+                .Data => @intCast(u16, ROM_START + label.location),
                 .Call => b: {
                     if (label.location >= 0xFFF) {
                         return error.JumpFoundInDataROM;
                     }
-                    break :b @intCast(u16, 0x1000 | label.location);
+                    break :b @intCast(u16, 0x1000 | (ROM_START + label.location));
                 },
             };
             buf.data[ua.romloc + 0] = @intCast(u8, (val >> 8) & 0xFF);
@@ -196,21 +198,21 @@ fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Codeg
 
     switch (args[0].Register) {
         .VRegister => |dest| switch (args[1]) {
-            .Byte => |b| try emit(buf, @as(u16, 0x6000 | (@as(u16, dest) << 12) | b)),
+            .Byte => |b| try emit(buf, @as(u16, 0x6000 | (@as(u16, dest) << 8) | b)),
             .Register => |r| switch (r) {
-                .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 12) | (@as(u16, src) << 4))),
-                .DelayTimer => try emit(buf, @as(u16, 0xF000 | (@as(u16, dest) << 12) | 0x07)),
+                .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 8) | (@as(u16, src) << 4))),
+                .DelayTimer => try emit(buf, @as(u16, 0xF000 | (@as(u16, dest) << 8) | 0x07)),
                 else => return error.InvalidArgument,
             },
             else => return error.InvalidArgument,
         },
         .Index => switch (args[1]) {
             .Byte => |b| try emit(buf, @as(u16, 0xA000 | @as(u16, b))),
-            .Word => |w| if (w > 0xFFF) {
+            .Word => |w| if ((ROM_START + w) > 0xFFF) {
                 try emit(buf, @as(u16, 0xA000 | w));
             } else {
                 try emit(buf, @as(u16, 0xF000));
-                try emit(buf, w);
+                try emit(buf, ROM_START + w);
             },
             .Identifier => |i| {
                 try emit(buf, @as(u16, 0xF000));
@@ -220,7 +222,7 @@ fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Codeg
         },
         .DelayTimer => switch (args[1]) {
             .Register => |r| switch (r) {
-                .VRegister => |src| try emit(buf, @as(u16, 0xF000 | (@as(u16, src) << 12))),
+                .VRegister => |src| try emit(buf, @as(u16, 0xF000 | (@as(u16, src) << 8))),
                 else => return error.InvalidArgument,
             },
             else => return error.InvalidArgument,
@@ -229,9 +231,37 @@ fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Codeg
 }
 
 fn _b_addassign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
-    // TODO
+    assert(args.len == 2);
+
+    if (activeTag(args[0]) != .Register)
+        return error.ExpectedRegister;
+
+    switch (args[0].Register) {
+        .VRegister => |dest| switch (args[1]) {
+            .Byte => |b| try emit(buf, @as(u16, 0x7000 | (@as(u16, dest) << 8) | b)),
+            .Register => |r| switch (r) {
+                .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 8) | (@as(u16, src) << 4) | 0x4)),
+                else => return error.InvalidArgument,
+            },
+            else => return error.InvalidArgument,
+        },
+        else => return error.InvalidArgument,
+    }
 }
 
 fn _b_draw(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
-    // TODO
+    assert(args.len == 3);
+
+    if (activeTag(args[0]) != .Register and activeTag(args[0].Register) != .VRegister)
+        return error.InvalidArgument;
+    if (activeTag(args[1]) != .Register and activeTag(args[1].Register) != .VRegister)
+        return error.InvalidArgument;
+    if (activeTag(args[2]) != .Byte)
+        return error.InvalidArgument;
+
+    const vx = @as(u16, args[0].Register.VRegister);
+    const vy = @as(u16, args[1].Register.VRegister);
+    const sz = args[2].Byte;
+
+    try emit(buf, @as(u16, 0xD000 | (vx << 8) | (vy << 4) | sz));
 }
