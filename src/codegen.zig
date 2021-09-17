@@ -9,6 +9,8 @@ const StackBufferError = @import("buffer.zig").StackBufferError;
 const ROMBuf = @import("common.zig").ROMBuf;
 const Program = @import("common.zig").Program;
 const Node = @import("common.zig").Node;
+const Value = @import("common.zig").Node.Value;
+const ValueList = @import("common.zig").ValueList;
 const NodeList = @import("common.zig").NodeList;
 
 const CodegenError = error{
@@ -19,6 +21,7 @@ const CodegenError = error{
     LabelFoundAsChild,
     UnknownIdentifier,
     ExpectedRegister,
+    InvalidArgument,
 } || mem.Allocator.Error || StackBufferError;
 
 // UA: Unresolved Address
@@ -41,7 +44,7 @@ const UA = struct {
     node: *Node,
 };
 
-pub const BuiltinFunc = fn (*const ValueList, buf: *ROMBuf) BuiltinError!void;
+pub const BuiltinFunc = fn (*Node, []const Value, buf: *ROMBuf, *UAList) CodegenError!void;
 
 pub const Builtin = struct {
     name: []const u8,
@@ -63,9 +66,9 @@ pub const BUILTINS = [_]Builtin{
 //
 //
 
-// 2NNN: JMP: Jump to NNN
+// 1NNN: JMP: Jump to NNN
 fn UI_jump(address: u12) u16 {
-    return 0x2000 | @as(u16, address);
+    return 0x1000 | @as(u16, address);
 }
 
 fn emit(buf: *ROMBuf, data: anytype) CodegenError!void {
@@ -99,7 +102,7 @@ fn emitUA(buf: *ROMBuf, ual: *UAList, uatype: UAType, ident: []const u8, node: *
 fn genNodeBytecode(node: *Node, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     switch (node.node) {
         .Label => |l| return error.LabelFoundAsChild,
-        .BuiltinCall => |b| try (b.builtin.func)(b.node.items, buf),
+        .BuiltinCall => |b| try (b.builtin.func)(node, b.node.items, buf, ual),
         .Loop => |l| {
             const loop_start = buf.len;
             if (loop_start >= 0xFFF) {
@@ -128,7 +131,7 @@ pub fn generateBinary(program: *Program, buf: *ROMBuf, alloc: *mem.Allocator) Co
         try genNodeBytecode(label.node.node.Label.body, buf, &ual);
     }
 
-    for (ual.items) |ua| {
+    ual_search: for (ual.items) |ua| {
         for (program.labels.items) |label| if (mem.eql(u8, label.name, ua.identifier)) {
             const val: u16 = switch (ua.type) {
                 .Data => @intCast(u16, label.location),
@@ -136,11 +139,13 @@ pub fn generateBinary(program: *Program, buf: *ROMBuf, alloc: *mem.Allocator) Co
                     if (label.location >= 0xFFF) {
                         return error.JumpFoundInDataROM;
                     }
-                    break :b @intCast(u16, 0x2000 | label.location);
+                    break :b @intCast(u16, 0x1000 | label.location);
                 },
             };
             buf.data[ua.romloc + 0] = @intCast(u8, (val >> 8) & 0xFF);
             buf.data[ua.romloc + 1] = @intCast(u8, (val >> 0) & 0xFF);
+
+            continue :ual_search;
         };
 
         // If we haven't matched a UA with a label by now, it's an invalid
@@ -183,17 +188,50 @@ pub fn extractLabels(program: *Program) CodegenError!void {
 //
 // zig fmt: on
 
-fn _b_assign(args: []const Value, buf: *ROMBuf) CodegenError!void {
+fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     assert(args.len == 2);
 
     if (activeTag(args[0]) != .Register)
         return error.ExpectedRegister;
+
+    switch (args[0].Register) {
+        .VRegister => |dest| switch (args[1]) {
+            .Byte => |b| try emit(buf, @as(u16, 0x6000 | (@as(u16, dest) << 12) | b)),
+            .Register => |r| switch (r) {
+                .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 12) | (@as(u16, src) << 4))),
+                .DelayTimer => try emit(buf, @as(u16, 0xF000 | (@as(u16, dest) << 12) | 0x07)),
+                else => return error.InvalidArgument,
+            },
+            else => return error.InvalidArgument,
+        },
+        .Index => switch (args[1]) {
+            .Byte => |b| try emit(buf, @as(u16, 0xA000 | @as(u16, b))),
+            .Word => |w| if (w > 0xFFF) {
+                try emit(buf, @as(u16, 0xA000 | w));
+            } else {
+                try emit(buf, @as(u16, 0xF000));
+                try emit(buf, w);
+            },
+            .Identifier => |i| {
+                try emit(buf, @as(u16, 0xF000));
+                try emitUA(buf, ual, .Data, i, node);
+            },
+            else => return error.InvalidArgument,
+        },
+        .DelayTimer => switch (args[1]) {
+            .Register => |r| switch (r) {
+                .VRegister => |src| try emit(buf, @as(u16, 0xF000 | (@as(u16, src) << 12))),
+                else => return error.InvalidArgument,
+            },
+            else => return error.InvalidArgument,
+        },
+    }
 }
 
-fn _b_addassign(args: []const Value, buf: *ROMBuf) CodegenError!void {
+fn _b_addassign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     // TODO
 }
 
-fn _b_draw(args: []const Value, buf: *ROMBuf) CodegenError!void {
+fn _b_draw(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     // TODO
 }

@@ -3,7 +3,7 @@ const mem = std.mem;
 
 const StackBuffer = @import("buffer.zig").StackBuffer;
 const StackBufferError = @import("buffer.zig").StackBufferError;
-const Builtin = @import("builtin.zig").Builtin;
+const Builtin = @import("codegen.zig").Builtin;
 
 pub const ROMBuf = StackBuffer(u8, 65535);
 pub const NodeList = std.ArrayList(Node);
