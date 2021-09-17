@@ -3,21 +3,31 @@ const mem = std.mem;
 
 const StackBuffer = @import("buffer.zig").StackBuffer;
 const StackBufferError = @import("buffer.zig").StackBufferError;
+const Builtin = @import("builtin.zig").Builtin;
 
 pub const ROMBuf = StackBuffer(u8, 65535);
 pub const NodeList = std.ArrayList(Node);
+pub const ValueList = std.ArrayList(Node.Value);
 
 pub const Node = struct {
     node: NodeType,
     location: usize,
     is_child: bool,
 
+    pub const NodeTag = @TagType(Node.NodeType);
+
     pub const NodeType = union(enum) {
-        Data: std.ArrayList(Value),
-        Assignment: Assignment,
-        Label: Label,
+        Label: Label, // Label declaration
+        BuiltinCall: BuiltinCall,
         Loop: *Node,
-        Proc: NodeList,
+        Data: ValueList, // Data block
+        Proc: NodeList, // Function block
+        UnresolvedIdentifier: []const u8,
+    };
+
+    pub const BuiltinCall = struct {
+        builtin: *const Builtin,
+        node: ValueList,
     };
 
     pub const Register = union(enum) {
@@ -36,11 +46,6 @@ pub const Node = struct {
     pub const Label = struct {
         name: []const u8,
         body: *Node,
-    };
-
-    pub const Assignment = struct {
-        source: Value,
-        dest: Register,
     };
 };
 

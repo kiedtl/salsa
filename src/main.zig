@@ -40,7 +40,7 @@ pub fn main() anyerror!void {
     try parser.parse(&lexed);
 
     try codegen.extractLabels(&program);
-    try codegen.generateBinary(&program, &emitted);
+    try codegen.generateBinary(&program, &emitted, &gpa.allocator);
 
     const outf = try std.fs.cwd().createFile("code.ch8", .{ .truncate = true });
     try outf.writeAll(emitted.constSlice());

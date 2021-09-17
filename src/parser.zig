@@ -3,9 +3,11 @@ const mem = std.mem;
 const activeTag = std.meta.activeTag;
 
 const lexer = @import("lexer.zig");
+const codegen = @import("codegen.zig");
 
 const Program = @import("common.zig").Program;
 const Node = @import("common.zig").Node;
+const ValueList = @import("common.zig").ValueList;
 const NodeList = @import("common.zig").NodeList;
 
 pub const Parser = struct {
@@ -20,6 +22,9 @@ pub const Parser = struct {
         ExpectedNode,
         UnexpectedItems,
         ExpectedValue,
+        ExpectedStatement,
+        UnknownKeyword,
+        UnexpectedLabelDefinition,
     } || mem.Allocator.Error;
 
     pub fn init(program: *Program, alloc: *mem.Allocator) Parser {
@@ -29,9 +34,9 @@ pub const Parser = struct {
         };
     }
 
-    fn validateListLength(ast: *const lexer.NodeList, require: usize) ParserError!void {
-        if (ast.items.len < require) return error.ExpectedItems;
-        if (ast.items.len > require) return error.UnexpectedItems;
+    fn validateListLength(ast: []const lexer.Node, require: usize) ParserError!void {
+        if (ast.len < require) return error.ExpectedItems;
+        if (ast.len > require) return error.UnexpectedItems;
     }
 
     fn expectNode(comptime nodetype: @TagType(lexer.Node.NodeType), node: *const lexer.Node) b: {
@@ -55,50 +60,104 @@ pub const Parser = struct {
         };
     }
 
-    fn parseList(self: *Parser, ast: *const lexer.NodeList, is_child: bool) ParserError!Node {
-        if (ast.items.len == 0)
+    fn parseStatement(self: *Parser, node: *const lexer.Node) ParserError!Node {
+        return switch (node.node) {
+            .List => |l| try self.parseList(l.items, true),
+            .Identifier => |i| Node{
+                .node = .{ .UnresolvedIdentifier = i },
+                .location = node.location,
+                .is_child = true,
+            },
+            else => error.ExpectedStatement,
+        };
+    }
+
+    fn parseList(self: *Parser, ast: []const lexer.Node, is_child: bool) ParserError!Node {
+        if (ast.len == 0)
             return error.EmptyList;
 
-        return switch (ast.items[0].node) {
+        return switch (ast[0].node) {
             .Keyword => |k| b: {
                 if (mem.eql(u8, k, "def")) {
-                    try validateListLength(ast, 3);
-                    const name = try expectNode(.Identifier, &ast.items[1]);
+                    if (is_child)
+                        return error.UnexpectedLabelDefinition;
 
-                    const raw_body = try expectNode(.List, &ast.items[2]);
-                    const body = try self.parseList(&raw_body, true);
+                    try validateListLength(ast, 3);
+                    const name = try expectNode(.Identifier, &ast[1]);
+
+                    const raw_body = try expectNode(.List, &ast[2]);
+                    const body = try self.parseList(raw_body.items, true);
 
                     const heap_body = try self.alloc.create(Node);
                     heap_body.* = body;
 
                     break :b Node{
                         .node = .{ .Label = .{ .name = name, .body = heap_body } },
-                        .location = ast.items[0].location,
-                        .is_child = is_child,
+                        .location = ast[0].location,
+                        .is_child = false,
                     };
                 } else if (mem.eql(u8, k, "data")) {
-                    var res = std.ArrayList(Node.Value).init(self.alloc);
-                    for (ast.items[1..]) |node| {
+                    var res = ValueList.init(self.alloc);
+                    for (ast[1..]) |node| {
                         try res.append(try self.parseValue(&node));
                     }
 
                     break :b Node{
                         .node = .{ .Data = res },
-                        .location = ast.items[0].location,
+                        .location = ast[0].location,
+                        .is_child = is_child,
+                    };
+                } else if (mem.eql(u8, k, "do")) {
+                    var res = NodeList.init(self.alloc);
+                    for (ast[1..]) |node|
+                        try res.append(try self.parseStatement(&node));
+
+                    break :b Node{
+                        .node = .{ .Proc = res },
+                        .location = ast[0].location,
+                        .is_child = is_child,
+                    };
+                } else if (mem.eql(u8, k, "loop")) {
+                    try validateListLength(ast, 2);
+
+                    const body = try self.parseStatement(&ast[1]);
+                    const heap_body = try self.alloc.create(Node);
+                    heap_body.* = body;
+
+                    break :b Node{
+                        .node = .{ .Loop = heap_body },
+                        .location = ast[0].location,
                         .is_child = is_child,
                     };
                 } else {
-                    break :b error.ExpectedValue; // temporary
+                    for (&codegen.BUILTINS) |*b| if (mem.eql(u8, b.name, k)) {
+                        if (b.arg_num) |arg_count|
+                            try validateListLength(ast, arg_count + 1);
+
+                        var body = ValueList.init(self.alloc);
+                        if (ast.len > 1) {
+                            for (ast[1..]) |node|
+                                try body.append(try self.parseValue(&node));
+                        }
+
+                        break :b Node{
+                            .node = .{ .BuiltinCall = .{ .builtin = b, .node = body } },
+                            .location = ast[0].location,
+                            .is_child = is_child,
+                        };
+                    };
+
+                    break :b error.UnknownKeyword;
                 }
             },
-            .List => |l| try self.parseList(&l, true),
+            .List => |l| try self.parseList(l.items, true),
             else => error.StrayToken,
         };
     }
 
     pub fn parse(self: *Parser, ast: *const lexer.NodeList) ParserError!void {
         for (ast.items) |*node| switch (node.node) {
-            .List => |l| try self.program.body.append(try self.parseList(&l, false)),
+            .List => |l| try self.program.body.append(try self.parseList(l.items, false)),
             else => return error.StrayToken,
         };
     }
