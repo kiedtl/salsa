@@ -1,18 +1,23 @@
 const std = @import("std");
 const mem = std.mem;
 
+const LinkedList = @import("list.zig").LinkedList;
 const StackBuffer = @import("buffer.zig").StackBuffer;
 const StackBufferError = @import("buffer.zig").StackBufferError;
 const Builtin = @import("codegen.zig").Builtin;
 
 pub const ROMBuf = StackBuffer(u8, 65535);
-pub const NodeList = std.ArrayList(Node);
 pub const ValueList = std.ArrayList(Node.Value);
+pub const NodeList = LinkedList(Node);
+pub const NodePtrArrayList = std.ArrayList(*Node);
 
 pub const Node = struct {
+    __prev: ?*Node = null,
+    __next: ?*Node = null,
+
     node: NodeType,
-    location: usize,
-    is_child: bool,
+    srcloc: usize,
+    romloc: usize = 0,
 
     pub const NodeTag = @TagType(Node.NodeType);
 
@@ -50,22 +55,27 @@ pub const Node = struct {
 };
 
 pub const Program = struct {
-    // Nodes must *not* be added to this list after parsing is complete, period.
-    // Doing so may cause a reallocation, invalidating all existing pointers.
     body: NodeList,
+    scope: Scope,
 
-    labels: std.ArrayList(Label),
+    pub const Scope = struct {
+        parent: ?*Scope,
+        children: ArrayList,
+        node: ?*Node,
+        labels: NodePtrArrayList,
 
-    pub const Label = struct {
-        name: []const u8,
-        node: *Node,
-        location: usize = 0,
+        pub const ArrayList = std.ArrayList(*Scope);
     };
 
     pub fn init(alloc: *mem.Allocator) Program {
         return .{
             .body = NodeList.init(alloc),
-            .labels = std.ArrayList(Label).init(alloc),
+            .scope = .{
+                .parent = null,
+                .children = Scope.ArrayList.init(alloc),
+                .node = null,
+                .labels = NodePtrArrayList.init(alloc),
+            },
         };
     }
 };

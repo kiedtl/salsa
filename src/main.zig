@@ -39,7 +39,6 @@ pub fn main() anyerror!void {
     var parser = parserm.Parser.init(&program, &gpa.allocator);
     try parser.parse(&lexed);
 
-    try codegen.extractLabels(&program);
     try codegen.generateBinary(&program, &emitted, &gpa.allocator);
 
     const outf = try std.fs.cwd().createFile("code.ch8", .{ .truncate = true });

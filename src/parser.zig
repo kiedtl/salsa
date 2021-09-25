@@ -62,39 +62,34 @@ pub const Parser = struct {
 
     fn parseStatement(self: *Parser, node: *const lexer.Node) ParserError!Node {
         return switch (node.node) {
-            .List => |l| try self.parseList(l.items, true),
+            .List => |l| try self.parseList(l.items),
             .Identifier => |i| Node{
                 .node = .{ .UnresolvedIdentifier = i },
-                .location = node.location,
-                .is_child = true,
+                .srcloc = node.location,
             },
             else => error.ExpectedStatement,
         };
     }
 
-    fn parseList(self: *Parser, ast: []const lexer.Node, is_child: bool) ParserError!Node {
+    fn parseList(self: *Parser, ast: []const lexer.Node) ParserError!Node {
         if (ast.len == 0)
             return error.EmptyList;
 
         return switch (ast[0].node) {
             .Keyword => |k| b: {
                 if (mem.eql(u8, k, "def")) {
-                    if (is_child)
-                        return error.UnexpectedLabelDefinition;
-
                     try validateListLength(ast, 3);
                     const name = try expectNode(.Identifier, &ast[1]);
 
                     const raw_body = try expectNode(.List, &ast[2]);
-                    const body = try self.parseList(raw_body.items, true);
+                    const body = try self.parseList(raw_body.items);
 
                     const heap_body = try self.alloc.create(Node);
                     heap_body.* = body;
 
                     break :b Node{
                         .node = .{ .Label = .{ .name = name, .body = heap_body } },
-                        .location = ast[0].location,
-                        .is_child = false,
+                        .srcloc = ast[0].location,
                     };
                 } else if (mem.eql(u8, k, "data")) {
                     var res = ValueList.init(self.alloc);
@@ -104,8 +99,7 @@ pub const Parser = struct {
 
                     break :b Node{
                         .node = .{ .Data = res },
-                        .location = ast[0].location,
-                        .is_child = is_child,
+                        .srcloc = ast[0].location,
                     };
                 } else if (mem.eql(u8, k, "do")) {
                     var res = NodeList.init(self.alloc);
@@ -114,8 +108,7 @@ pub const Parser = struct {
 
                     break :b Node{
                         .node = .{ .Proc = res },
-                        .location = ast[0].location,
-                        .is_child = is_child,
+                        .srcloc = ast[0].location,
                     };
                 } else if (mem.eql(u8, k, "loop")) {
                     try validateListLength(ast, 2);
@@ -126,8 +119,7 @@ pub const Parser = struct {
 
                     break :b Node{
                         .node = .{ .Loop = heap_body },
-                        .location = ast[0].location,
-                        .is_child = is_child,
+                        .srcloc = ast[0].location,
                     };
                 } else {
                     for (&codegen.BUILTINS) |*b| if (mem.eql(u8, b.name, k)) {
@@ -142,22 +134,21 @@ pub const Parser = struct {
 
                         break :b Node{
                             .node = .{ .BuiltinCall = .{ .builtin = b, .node = body } },
-                            .location = ast[0].location,
-                            .is_child = is_child,
+                            .srcloc = ast[0].location,
                         };
                     };
 
                     break :b error.UnknownKeyword;
                 }
             },
-            .List => |l| try self.parseList(l.items, true),
+            .List => |l| try self.parseList(l.items),
             else => error.StrayToken,
         };
     }
 
     pub fn parse(self: *Parser, ast: *const lexer.NodeList) ParserError!void {
         for (ast.items) |*node| switch (node.node) {
-            .List => |l| try self.program.body.append(try self.parseList(l.items, false)),
+            .List => |l| try self.program.body.append(try self.parseList(l.items)),
             else => return error.StrayToken,
         };
     }

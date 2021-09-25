@@ -12,14 +12,14 @@ const Node = @import("common.zig").Node;
 const Value = @import("common.zig").Node.Value;
 const ValueList = @import("common.zig").ValueList;
 const NodeList = @import("common.zig").NodeList;
+const NodePtrArrayList = @import("common.zig").NodePtrArrayList;
 
 const ROM_START = 0x200;
 
 const CodegenError = error{
     DuplicateLabel,
-    NoMainLabel,
     RegisterFoundInDataBlock,
-    JumpFoundInDataROM,
+    ShortAddrFoundInDataROM,
     LabelFoundAsChild,
     UnknownIdentifier,
     ExpectedRegister,
@@ -37,16 +37,23 @@ const CodegenError = error{
 // (they were extracted earlier), we don't know where they'll be in the ROM
 // until *after* the codegen process.
 //
+// The UAType determines how the ual-resolver should insert the address:
+//      - Data:      insert as a raw byte.
+//      - Call:      insert and mask with 0x2000.
+//      - Jump:      insert and mask with 0x1000.
+//      - IndexLoad: insert and mask with 0xA000.
+//
 const UAList = std.ArrayList(UA);
-const UAType = enum { Data, Call };
+const UAType = enum { Data, Call, Jump, IndexLoad };
 const UA = struct {
     romloc: usize,
     identifier: []const u8,
     type: UAType,
     node: *Node,
+    scope: *Program.Scope,
 };
 
-pub const BuiltinFunc = fn (*Node, []const Value, buf: *ROMBuf, *UAList) CodegenError!void;
+pub const BuiltinFunc = fn (*Program.Scope, *Node, []const Value, buf: *ROMBuf, *UAList) CodegenError!void;
 
 pub const Builtin = struct {
     name: []const u8,
@@ -88,99 +95,120 @@ fn emit(buf: *ROMBuf, data: anytype) CodegenError!void {
     }
 }
 
-fn emitUA(buf: *ROMBuf, ual: *UAList, uatype: UAType, ident: []const u8, node: *Node) CodegenError!void {
+fn emitUA(
+    buf: *ROMBuf,
+    scope: *Program.Scope,
+    ual: *UAList,
+    uatype: UAType,
+    ident: []const u8,
+    node: *Node,
+) CodegenError!void {
     // FIXME: we just assume that we're dealing with a 16-bit address/word/data here,
     // but if uatype == .Data it could be a u8 as well. We should automatically infer
     // that here (we *should* know all identifiers by now, just not the addresses)
     try ual.append(.{
         .romloc = buf.len,
         .identifier = ident,
+        .scope = scope,
         .type = uatype,
         .node = node,
     });
     try emit(buf, @as(u16, 0x0000));
 }
 
-fn genNodeBytecode(node: *Node, buf: *ROMBuf, ual: *UAList) CodegenError!void {
+fn genNodeBytecode(
+    program: *Program,
+    scope: *Program.Scope,
+    node: *Node,
+    buf: *ROMBuf,
+    ual: *UAList,
+    alloc: *mem.Allocator,
+) CodegenError!void {
     switch (node.node) {
-        .Label => |l| return error.LabelFoundAsChild,
-        .BuiltinCall => |b| try (b.builtin.func)(node, b.node.items, buf, ual),
+        .Label => |l| {
+            // Create a new scope
+            const newscope = try alloc.create(Program.Scope);
+            newscope.* = .{
+                .parent = scope,
+                .children = Program.Scope.ArrayList.init(alloc),
+                .node = node,
+                .labels = NodePtrArrayList.init(alloc),
+            };
+            try scope.children.append(newscope);
+            try scope.labels.append(node);
+
+            node.romloc = buf.len;
+            try genNodeBytecode(program, newscope, l.body, buf, ual, alloc);
+        },
+        .BuiltinCall => |b| try (b.builtin.func)(scope, node, b.node.items, buf, ual),
         .Loop => |l| {
             const loop_start = buf.len - 2;
             if ((ROM_START + loop_start) >= 0xFFF) {
-                return error.JumpFoundInDataROM;
+                return error.ShortAddrFoundInDataROM;
             }
 
-            try genNodeBytecode(l, buf, ual);
+            // TODO: create new scope
+            try genNodeBytecode(program, scope, l, buf, ual, alloc);
             try emit(buf, UI_jump(@intCast(u12, loop_start)));
         },
         .Data => |d| for (d.items) |value| switch (value) {
             .Register => |_| return error.RegisterFoundInDataBlock,
-            .Identifier => |i| try emitUA(buf, ual, .Data, i, node),
+            .Identifier => |i| try emitUA(buf, scope, ual, .Data, i, node),
             .Byte => |b| try buf.append(b),
             .Word => |w| try emit(buf, w),
         },
-        .Proc => |p| for (p.items) |*pn| try genNodeBytecode(pn, buf, ual),
-        .UnresolvedIdentifier => |i| try emitUA(buf, ual, .Call, i, node),
+        .Proc => |p| {
+            var iter = p.iterator();
+            while (iter.next()) |pn|
+                try genNodeBytecode(program, scope, pn, buf, ual, alloc);
+        },
+        .UnresolvedIdentifier => |i| try emitUA(buf, scope, ual, .Call, i, node),
     }
 }
 
 pub fn generateBinary(program: *Program, buf: *ROMBuf, alloc: *mem.Allocator) CodegenError!void {
     var ual = UAList.init(alloc);
 
-    for (program.labels.items) |*label| {
-        label.location = buf.len;
-        try genNodeBytecode(label.node.node.Label.body, buf, &ual);
+    var bodyiter = program.body.iterator();
+    while (bodyiter.next()) |node| {
+        try genNodeBytecode(program, &program.scope, node, buf, &ual, alloc);
     }
 
     ual_search: for (ual.items) |ua| {
-        for (program.labels.items) |label| if (mem.eql(u8, label.name, ua.identifier)) {
-            const val: u16 = switch (ua.type) {
-                .Data => @intCast(u16, ROM_START + label.location),
-                .Call => b: {
-                    if (label.location >= 0xFFF) {
-                        return error.JumpFoundInDataROM;
-                    }
-                    break :b @intCast(u16, 0x1000 | (ROM_START + label.location));
-                },
-            };
-            buf.data[ua.romloc + 0] = @intCast(u8, (val >> 8) & 0xFF);
-            buf.data[ua.romloc + 1] = @intCast(u8, (val >> 0) & 0xFF);
+        var _scope: ?*Program.Scope = &program.scope;
+        while (_scope) |scope| : (_scope = _scope.?.parent) {
+            for (scope.labels.items) |labelnode| {
+                const label = labelnode.node.Label;
 
-            continue :ual_search;
-        };
+                if (mem.eql(u8, label.name, ua.identifier)) {
+                    const val: u16 = switch (ua.type) {
+                        .Data => @intCast(u16, ROM_START + labelnode.romloc),
+                        .Call, .Jump, .IndexLoad => b: {
+                            if (labelnode.romloc >= 0xFFF) {
+                                return error.ShortAddrFoundInDataROM;
+                            }
+
+                            const mask: u16 = switch (ua.type) {
+                                .Call => 0x1000,
+                                .Jump => 0x2000,
+                                .IndexLoad => 0xA000,
+                                else => unreachable,
+                            };
+
+                            break :b @intCast(u16, mask | (ROM_START + labelnode.romloc));
+                        },
+                    };
+                    buf.data[ua.romloc + 0] = @intCast(u8, (val >> 8) & 0xFF);
+                    buf.data[ua.romloc + 1] = @intCast(u8, (val >> 0) & 0xFF);
+
+                    continue :ual_search;
+                }
+            }
+        }
 
         // If we haven't matched a UA with a label by now, it's an invalid
         // identifier
         return error.UnknownIdentifier;
-    }
-}
-
-// - Extract labels into program.labels, deduplicating them in the process.
-// - The first label is always the starting one.
-//
-pub fn extractLabels(program: *Program) CodegenError!void {
-    for (program.body.items) |*node| switch (node.node) {
-        .Label => |l| {
-            // Check if the label is already defined.
-            for (program.labels.items) |e_l| if (mem.eql(u8, e_l.name, l.name))
-                return error.DuplicateLabel;
-
-            const label = Program.Label{ .name = l.name, .node = node };
-
-            if (mem.eql(u8, l.name, "main")) {
-                try program.labels.insert(0, label);
-            } else {
-                try program.labels.append(label);
-            }
-        },
-        else => {},
-    };
-
-    if (program.labels.items.len == 0 or
-        !mem.eql(u8, "main", program.labels.items[0].name))
-    {
-        return error.NoMainLabel;
     }
 }
 
@@ -190,7 +218,7 @@ pub fn extractLabels(program: *Program) CodegenError!void {
 //
 // zig fmt: on
 
-fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
+fn _b_assign(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     assert(args.len == 2);
 
     if (activeTag(args[0]) != .Register)
@@ -215,8 +243,9 @@ fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Codeg
                 try emit(buf, ROM_START + w);
             },
             .Identifier => |i| {
-                try emit(buf, @as(u16, 0xF000));
-                try emitUA(buf, ual, .Data, i, node);
+                //try emit(buf, @as(u16, 0xF000));
+                //try emitUA(buf, ual, .Data, i, node);
+                try emitUA(buf, scope, ual, .IndexLoad, i, node);
             },
             else => return error.InvalidArgument,
         },
@@ -230,7 +259,7 @@ fn _b_assign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Codeg
     }
 }
 
-fn _b_addassign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
+fn _b_addassign(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     assert(args.len == 2);
 
     if (activeTag(args[0]) != .Register)
@@ -249,7 +278,7 @@ fn _b_addassign(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) Co
     }
 }
 
-fn _b_draw(node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
+fn _b_draw(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMBuf, ual: *UAList) CodegenError!void {
     assert(args.len == 3);
 
     if (activeTag(args[0]) != .Register and activeTag(args[0].Register) != .VRegister)
