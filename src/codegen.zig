@@ -24,6 +24,7 @@ const CodegenError = error{
     UnknownIdentifier,
     ExpectedRegister,
     InvalidArgument,
+    IntegerTooLarge,
 } || mem.Allocator.Error || StackBufferError;
 
 // UA: Unresolved Address
@@ -74,6 +75,12 @@ pub const BUILTINS = [_]Builtin{
 // -----------------------------------------------------------------------------
 //
 //
+
+fn checkIntSize(comptime T: type, i: usize) CodegenError!T {
+    const max = std.math.maxInt(T);
+    if (i > max) return error.IntegerTooLarge;
+    return @intCast(T, i);
+}
 
 // 1NNN: JMP: Jump to NNN
 fn UI_jump(address: u12) u16 {
@@ -154,8 +161,10 @@ fn genNodeBytecode(
         .Data => |d| for (d.items) |value| switch (value) {
             .Register => |_| return error.RegisterFoundInDataBlock,
             .Identifier => |i| try emitUA(buf, scope, ual, .Data, i, node),
-            .Byte => |b| try buf.append(b),
-            .Word => |w| try emit(buf, w),
+            .Integer => |i| {
+                if (i > 0xFF) return error.IntegerTooLarge;
+                try emit(buf, @intCast(u8, i));
+            },
         },
         .Proc => |p| {
             var iter = p.iterator();
@@ -226,7 +235,7 @@ fn _b_assign(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMB
 
     switch (args[0].Register) {
         .VRegister => |dest| switch (args[1]) {
-            .Byte => |b| try emit(buf, @as(u16, 0x6000 | (@as(u16, dest) << 8) | b)),
+            .Integer => |i| try emit(buf, @as(u16, 0x6000 | (@as(u16, dest) << 8) | (try checkIntSize(u8, i)))),
             .Register => |r| switch (r) {
                 .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 8) | (@as(u16, src) << 4))),
                 .DelayTimer => try emit(buf, @as(u16, 0xF000 | (@as(u16, dest) << 8) | 0x07)),
@@ -235,12 +244,11 @@ fn _b_assign(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMB
             else => return error.InvalidArgument,
         },
         .Index => switch (args[1]) {
-            .Byte => |b| try emit(buf, @as(u16, 0xA000 | @as(u16, b))),
-            .Word => |w| if ((ROM_START + w) > 0xFFF) {
-                try emit(buf, @as(u16, 0xA000 | w));
+            .Integer => |i| if ((ROM_START + i) <= 0xFFF) {
+                try emit(buf, @as(u16, 0xA000 | @as(u16, try checkIntSize(u12, i))));
             } else {
                 try emit(buf, @as(u16, 0xF000));
-                try emit(buf, ROM_START + w);
+                try emit(buf, @as(u16, ROM_START + (try checkIntSize(u16, i))));
             },
             .Identifier => |i| {
                 //try emit(buf, @as(u16, 0xF000));
@@ -267,7 +275,7 @@ fn _b_addassign(scope: *Program.Scope, node: *Node, args: []const Value, buf: *R
 
     switch (args[0].Register) {
         .VRegister => |dest| switch (args[1]) {
-            .Byte => |b| try emit(buf, @as(u16, 0x7000 | (@as(u16, dest) << 8) | b)),
+            .Integer => |i| try emit(buf, @as(u16, 0x7000 | (@as(u16, dest) << 8) | (try checkIntSize(u8, i)))),
             .Register => |r| switch (r) {
                 .VRegister => |src| try emit(buf, @as(u16, 0x8000 | (@as(u16, dest) << 8) | (@as(u16, src) << 4) | 0x4)),
                 else => return error.InvalidArgument,
@@ -285,12 +293,12 @@ fn _b_draw(scope: *Program.Scope, node: *Node, args: []const Value, buf: *ROMBuf
         return error.InvalidArgument;
     if (activeTag(args[1]) != .Register and activeTag(args[1].Register) != .VRegister)
         return error.InvalidArgument;
-    if (activeTag(args[2]) != .Byte)
+    if (activeTag(args[2]) != .Integer)
         return error.InvalidArgument;
 
     const vx = @as(u16, args[0].Register.VRegister);
     const vy = @as(u16, args[1].Register.VRegister);
-    const sz = args[2].Byte;
+    const sz = try checkIntSize(u3, args[2].Integer);
 
     try emit(buf, @as(u16, 0xD000 | (vx << 8) | (vy << 4) | sz));
 }

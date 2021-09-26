@@ -50,8 +50,7 @@ pub const Parser = struct {
 
     fn parseValue(self: *Parser, node: *const lexer.Node) ParserError!Node.Value {
         return switch (node.node) {
-            .Byte => |b| .{ .Byte = b },
-            .Word => |w| .{ .Word = w },
+            .Integer => |i| .{ .Integer = i },
             .Register => |r| .{ .Register = .{ .VRegister = r } },
             .Index => .{ .Register = .Index },
             .DelayTimer => .{ .Register = .DelayTimer },

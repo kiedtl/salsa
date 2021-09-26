@@ -44,8 +44,7 @@ pub const Node = struct {
     pub const Value = union(enum) {
         Identifier: []const u8,
         Register: Register,
-        Byte: u8,
-        Word: u16,
+        Integer: usize,
     };
 
     pub const Label = struct {
